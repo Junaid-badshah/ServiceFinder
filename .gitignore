@@ -1,0 +1,23 @@
+# Frontend
+node_modules/
+dist/
+.env
+.env.local
+
+# Backend
+target/
+*.class
+*.jar
+.mvn/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+*.log
+ServiceFinder-Backend/.idea/
+ServiceFinder-Frontend/.idea/
+**/application.properties

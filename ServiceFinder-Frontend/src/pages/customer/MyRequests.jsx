@@ -1,0 +1,331 @@
+import { useEffect, useState, useRef } from "react";
+import { Link } from "react-router-dom";
+import { getRequestsByUser } from "../../services/api";
+import api from "../../services/api";
+import { useAuth } from "../../context/AuthContext";
+import ChatWindow from "../../components/chat/ChatWindow";
+import TrackProviderMap from "../../components/TrackProviderMap";
+
+export default function MyRequests() {
+  const { user } = useAuth();
+  const [requests, setRequests] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const [reviewedRequestIds, setReviewedRequestIds] = useState([]);
+  const [showReviewModal, setShowReviewModal] = useState(false);
+  const [reviewRequestId, setReviewRequestId] = useState(null);
+  const [reviewRating, setReviewRating] = useState(5);
+  const [reviewComment, setReviewComment] = useState('');
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+  const [reviewError, setReviewError] = useState('');
+
+  const [showChat, setShowChat] = useState(false);
+  const [chatReceiver, setChatReceiver] = useState(null);
+  const [chatRequestId, setChatRequestId] = useState(null);
+  const [unreadCounts, setUnreadCounts] = useState({});
+
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancelReqId, setCancelReqId] = useState(null);
+  const [cancelCategory, setCancelCategory] = useState('');
+  const [cancelDesc, setCancelDesc] = useState('');
+  const [cancelling, setCancelling] = useState(false);
+
+  const [timeLeft, setTimeLeft] = useState({});
+
+  // 👇 NAYA: Customer GPS tracking ke liye refs 👇
+  const watchIdRef = useRef(null);
+  const activeIdsRef = useRef([]);
+
+  useEffect(() => { fetchRequests(); }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => { fetchRequests(true); }, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // 👇 NAYA: Customer ke live location ko track karne ke liye 👇
+  useEffect(() => {
+    activeIdsRef.current = requests.filter(r => ['ACCEPTED', 'ARRIVED', 'IN_PROGRESS'].includes((r.status || '').toUpperCase())).map(r => r.id);
+  }, [requests]);
+
+  useEffect(() => {
+    if (navigator.geolocation && !watchIdRef.current) {
+      watchIdRef.current = navigator.geolocation.watchPosition(
+          async (pos) => {
+            const ids = activeIdsRef.current;
+            if (ids.length === 0) return;
+            try {
+              for (const id of ids) {
+                await api.put(`/requests/${id}/location`, { lat: pos.coords.latitude, lng: pos.coords.longitude });
+              }
+            } catch (err) { }
+          },
+          (err) => console.error("Location error:", err),
+          { enableHighAccuracy: true, maximumAge: 10000, timeout: 5000 }
+      );
+    }
+    return () => {
+      if (watchIdRef.current) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+        watchIdRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const newTimeLeft = {};
+      requests.forEach(r => {
+        if (r.status === 'PENDING' && r.expiresAt) {
+          const diff = new Date(r.expiresAt).getTime() - new Date().getTime();
+          if (diff > 0) {
+            const mins = Math.floor(diff / 60000);
+            const secs = Math.floor((diff % 60000) / 1000);
+            newTimeLeft[r.id] = `${mins}:${secs.toString().padStart(2, '0')}`;
+          } else {
+            newTimeLeft[r.id] = 'Expired';
+          }
+        }
+      });
+      setTimeLeft(newTimeLeft);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [requests]);
+
+  const fetchRequests = async (isSilent = false) => {
+    if (!isSilent) setLoading(true);
+    try {
+      const res = await getRequestsByUser(user.id);
+      const sorted = (res.data || []).sort((a, b) => (b.id || 0) - (a.id || 0));
+      setRequests(sorted);
+
+      const reviewsRes = await api.get('/reviews/customer');
+      setReviewedRequestIds(reviewsRes.data.map(rev => rev.request.id));
+
+      const updatedIds = sorted
+          .filter(r => ['ACCEPTED', 'REJECTED', 'COMPLETED', 'CANCELLED', 'EXPIRED'].includes((r.status || '').toUpperCase()))
+          .map(r => r.id);
+      const existingSeen = JSON.parse(localStorage.getItem('seenUpdates') || '[]');
+      const mergedSeen = Array.from(new Set([...existingSeen, ...updatedIds]));
+      localStorage.setItem('seenUpdates', JSON.stringify(mergedSeen));
+
+    } catch (err) { console.error(err); }
+    finally { if (!isSilent) setLoading(false); }
+  };
+
+  const handleSubmitReview = async () => {
+    if (reviewRating < 1 || reviewRating > 5) return setReviewError('Please select 1 to 5 stars');
+    setReviewSubmitting(true); setReviewError('');
+    try {
+      // Backend will automatically mark this as COMPLETED
+      await api.post('/reviews', { requestId: reviewRequestId, rating: reviewRating, comment: reviewComment });
+      setShowReviewModal(false);
+      alert('⭐ Thank you! Aapka review submit ho gaya hai. Request ab History mein chali gayi hai.');
+      fetchRequests();
+    } catch (err) { setReviewError(err.response?.data?.error || 'Review submit nahi ho saka'); }
+    finally { setReviewSubmitting(false); }
+  };
+
+  const handleCancelRequest = async () => {
+    if (!cancelCategory) return alert('Please select a reason category');
+    if (cancelCategory === 'Other' && !cancelDesc.trim()) return alert('Please describe your reason');
+    setCancelling(true);
+    try {
+      await api.post(`/requests/${cancelReqId}/request-cancel`, { cancelledBy: 'CUSTOMER', category: cancelCategory, description: cancelDesc });
+      alert('✅ Cancellation request sent to Admin for review.');
+      setShowCancelModal(false);
+      fetchRequests();
+    } catch (err) { alert('Failed to send cancellation request'); }
+    finally { setCancelling(false); }
+  };
+
+  const statusColor = (status) => {
+    switch ((status || '').toUpperCase()) {
+      case "PENDING": return "bg-yellow-100 text-yellow-800";
+      case "ACCEPTED": return "bg-green-100 text-green-800";
+      case "ARRIVED": return "bg-purple-100 text-purple-800";
+      case "IN_PROGRESS": return "bg-blue-100 text-blue-800";
+      case "CANCELLATION_PENDING": return "bg-orange-100 text-orange-800";
+      default: return "bg-gray-100 text-gray-800";
+    }
+  };
+
+  const fullTimestamp = (ts) => {
+    if (!ts) return '-';
+    try {
+      const d = new Date(ts);
+      return d.toLocaleString('en-PK', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true });
+    } catch (err) { return '-'; }
+  };
+
+  // Active requests sirf yeh statuses hain (COMPLETED nahi hai)
+  const activeStatuses = ['PENDING', 'ACCEPTED', 'ARRIVED', 'IN_PROGRESS', 'CANCELLATION_PENDING'];
+  const activeRequests = requests.filter(r => activeStatuses.includes((r.status || '').toUpperCase()));
+
+  if (loading) return <div className="text-center py-20 text-gray-500">Loading...</div>;
+
+  return (
+      <div className="max-w-4xl mx-auto px-4 py-8">
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-white mb-6">Active Service Requests</h1>
+
+        {activeRequests.length === 0 ? (
+            <div className="bg-white dark:bg-gray-800 rounded-2xl p-10 text-center shadow-sm border border-gray-200 dark:border-gray-700">
+              <p className="text-6xl mb-4">🔍</p>
+              <p className="text-gray-500 mb-4">Koi active request nahi hai</p>
+              <Link to="/providers" className="inline-block bg-primary-600 hover:bg-primary-700 text-white px-6 py-2 rounded-lg font-bold transition">Browse Providers →</Link>
+            </div>
+        ) : (
+            <div className="space-y-4">
+              {activeRequests.map((r) => {
+                const st = (r.status || '').toUpperCase();
+                const isReviewed = reviewedRequestIds.includes(r.id);
+
+                return (
+                    <div key={r.id} className="bg-white dark:bg-gray-800 rounded-2xl p-5 shadow-sm border border-gray-200 dark:border-gray-700 flex flex-col">
+                      <div className="flex justify-between items-start mb-3">
+                        <div>
+                          <h3 className="text-lg font-bold text-gray-900 dark:text-white">Request #{r.id} - {r.serviceName || 'Service'}</h3>
+                          <p className="text-sm text-gray-500 mt-1">To: <strong>{r.provider?.name || "Multiple Providers"}</strong></p>
+                          {r.createdAt && <p className="text-xs text-blue-600 dark:text-blue-400 font-medium mt-1">🕒 Request bheji: {fullTimestamp(r.createdAt)}</p>}
+                        </div>
+                        <span className={`px-3 py-1 rounded-full text-xs font-bold ${statusColor(r.status)}`}>{st.replace('_', ' ')}</span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm text-gray-600 dark:text-gray-400 mb-4 flex-1">
+                        <p className="md:col-span-2">📍 <strong>Location:</strong> {r.location || '-'}</p>
+                        <p className="md:col-span-2 bg-blue-50 dark:bg-blue-900/20 p-2 rounded-lg text-blue-700 dark:text-blue-400 font-bold">💰 Total Booking Price: Rs. {r.agreedPrice || r.offeredPrice || r.provider?.rate || 'Negotiable'}</p>
+
+                        {st === 'PENDING' && (
+                            <div className="md:col-span-2 bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded-xl flex flex-col md:flex-row items-center justify-between mt-2 border border-yellow-200 dark:border-yellow-800 gap-3">
+                              <div>
+                                <span className="text-yellow-800 dark:text-yellow-400 font-bold text-sm">⏳ Waiting for Provider to accept...</span>
+                                {timeLeft[r.id] && <span className="ml-2 text-red-600 font-bold bg-white px-2 py-1 rounded">Time Left: {timeLeft[r.id]}</span>}
+                              </div>
+                            </div>
+                        )}
+
+                        {(st === 'ACCEPTED' || st === 'ARRIVED' || st === 'IN_PROGRESS') && r.provider?.phone && (
+                            <>
+                              <div className={`md:col-span-2 p-3 rounded-xl flex items-center justify-center mt-2 border ${st === 'ARRIVED' ? 'bg-purple-50 dark:bg-purple-900/20 border-purple-200 dark:border-purple-800' : 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'}`}>
+                        <span className={`font-bold text-sm ${st === 'ARRIVED' ? 'text-purple-800 dark:text-purple-400' : 'text-green-800 dark:text-green-400'}`}>
+                          {st === 'ACCEPTED' && '✅ Request Accepted!'}
+                          {st === 'ARRIVED' && '📍 Provider has Arrived!'}
+                          {st === 'IN_PROGRESS' && '🛠️ Service in Progress...'}
+                        </span>
+                              </div>
+
+                              {(st === 'ACCEPTED' || st === 'ARRIVED') && (
+                                  <div className="md:col-span-2 mb-2 mt-2">
+                                    <p className="text-xs text-gray-500 mb-1 font-semibold">🗺️ Provider Live Location:</p>
+                                    <TrackProviderMap
+                                        customerLocation={r.location}
+                                        customerLat={r.latitude}
+                                        customerLng={r.longitude}
+                                        providerLat={r.providerLat}
+                                        providerLng={r.providerLng}
+                                    />
+                                  </div>
+                              )}
+                            </>
+                        )}
+
+                        {st === 'CANCELLATION_PENDING' && (
+                            <div className="md:col-span-2 bg-orange-50 dark:bg-orange-900/20 p-4 rounded-xl mt-2 border border-orange-200 dark:border-orange-800">
+                              <div className="flex items-center gap-2 mb-2">
+                                <span className="text-orange-800 dark:text-orange-400 font-bold text-sm">⏳ Cancellation Pending Admin Approval</span>
+                              </div>
+                              <div className="text-sm text-orange-700 dark:text-orange-300 bg-orange-100 dark:bg-orange-900/40 p-3 rounded-lg">
+                                <p><strong>Reason:</strong> {r.cancelReasonCategory || 'Not specified'}</p>
+                                {r.cancelReasonDescription && (
+                                    <p className="mt-1 text-xs"><strong>Details:</strong> {r.cancelReasonDescription}</p>
+                                )}
+                              </div>
+                            </div>
+                        )}
+                      </div>
+
+                      {r.message && <div className="bg-gray-50 dark:bg-gray-700/50 p-3 rounded-xl text-sm border border-gray-100 dark:border-gray-700 mb-4"><span className="font-semibold text-gray-700 dark:text-gray-300">Message: </span>{r.message}</div>}
+
+                      {/* 👇 SABSE NEECHE 3 BUTTONS (Chat, Cancel, Review) 👇 */}
+                      {['ACCEPTED', 'ARRIVED', 'IN_PROGRESS'].includes(st) && (
+                          <div className="mt-auto pt-4 border-t border-gray-100 dark:border-gray-700 flex flex-wrap gap-2">
+
+                            <button onClick={() => { setChatRequestId(r.id); setChatReceiver({ id: r.provider.userId, name: r.provider.name }); setShowChat(true); }} className="relative flex-1 min-w-[120px] bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-bold text-sm transition flex items-center justify-center gap-2">
+                              💬 Chat
+                              {unreadCounts[r.id] > 0 && (<span className="absolute -top-1 -right-1 flex h-4 w-4"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span><span className="relative inline-flex rounded-full h-4 w-4 bg-red-500 border-2 border-white"></span></span>)}
+                            </button>
+
+                            <button onClick={() => { setCancelReqId(r.id); setShowCancelModal(true); setCancelCategory(''); setCancelDesc(''); }} className="flex-1 min-w-[120px] bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg font-bold text-sm transition">
+                              ❌ Cancel Request
+                            </button>
+
+                            {/* Review Button (Hamesha Available) */}
+                            <button onClick={() => { setReviewRequestId(r.id); setShowReviewModal(true); setReviewError(''); setReviewRating(5); setReviewComment(''); }} className="flex-1 min-w-[120px] bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 rounded-lg font-bold text-sm transition">
+                              ⭐ Give Review
+                            </button>
+                          </div>
+                      )}
+
+                    </div>
+                );
+              })}
+            </div>
+        )}
+
+        {/* REVIEW MODAL */}
+        {showReviewModal && (
+            <div className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-4">
+              <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl w-full max-w-md p-6">
+                <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100 mb-2">Rate Your Provider</h2>
+                <p className="text-sm text-gray-500 mb-6">Kaam kaisa laga? Apni rating dein taake request complete ho jaye.</p>
+                {reviewError && <div className="bg-red-50 text-red-700 p-2 rounded mb-4 text-sm">{reviewError}</div>}
+                <div className="flex justify-center gap-2 mb-6">
+                  {[1, 2, 3, 4, 5].map((star) => (<button key={star} onClick={() => setReviewRating(star)} className={`text-4xl transition ${reviewRating >= star ? 'text-yellow-400' : 'text-gray-300'}`}>★</button>))}
+                </div>
+                <textarea value={reviewComment} onChange={(e) => setReviewComment(e.target.value)} placeholder="Write a short review (optional)..." rows="3" className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-xl bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 mb-6 focus:outline-none focus:ring-2 focus:ring-primary-500" />
+                <div className="flex gap-3">
+                  <button onClick={handleSubmitReview} disabled={reviewSubmitting} className="flex-1 bg-primary-600 hover:bg-primary-700 text-white py-3 rounded-xl font-bold transition disabled:opacity-50">{reviewSubmitting ? 'Submitting...' : 'Submit Review'}</button>
+                  <button onClick={() => setShowReviewModal(false)} className="px-6 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-100 py-3 rounded-xl font-bold">Cancel</button>
+                </div>
+              </div>
+            </div>
+        )}
+
+        {/* CANCEL REQUEST MODAL */}
+        {showCancelModal && (
+            <div className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-4">
+              <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl w-full max-w-md p-6">
+                <h2 className="text-2xl font-bold text-red-600 mb-2">Cancel Request</h2>
+                <p className="text-sm text-gray-500 mb-4">Your cancellation request will be reviewed by Admin.</p>
+                <div className="space-y-4 mb-6">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Reason Category *</label>
+                    <select value={cancelCategory} onChange={(e) => setCancelCategory(e.target.value)} className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100">
+                      <option value="">-- Select Reason --</option>
+                      <option value="Provider is taking too long">Provider is taking too long</option>
+                      <option value="Found another provider">Found another provider</option>
+                      <option value="Change of plans">Change of plans</option>
+                      <option value="Emergency">Emergency</option>
+                      <option value="Other">Other</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Description {cancelCategory === 'Other' ? '*' : '(Optional)'}</label>
+                    <textarea value={cancelDesc} onChange={(e) => setCancelDesc(e.target.value)} rows="3" className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100" placeholder="Explain your reason..." />
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <button onClick={handleCancelRequest} disabled={cancelling} className="flex-1 bg-red-600 hover:bg-red-700 text-white py-3 rounded-xl font-bold transition disabled:opacity-50">{cancelling ? 'Sending...' : 'Submit Cancellation'}</button>
+                  <button onClick={() => setShowCancelModal(false)} className="px-6 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-100 py-3 rounded-xl font-bold">Back</button>
+                </div>
+              </div>
+            </div>
+        )}
+
+        {/* Chat Modal */}
+        {showChat && chatReceiver && (
+            <ChatWindow requestId={chatRequestId} receiverId={chatReceiver.id} receiverName={chatReceiver.name} onClose={() => setShowChat(false)} />
+        )}
+      </div>
+  );
+}

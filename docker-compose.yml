@@ -1,0 +1,83 @@
+services:
+  mysql:
+    image: mysql:8
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: servicefinder1 # 👈 Naya Database
+      MYSQL_USER: junaid
+      MYSQL_PASSWORD: Junaid@123
+    ports:
+      - "3307:3306" # 👈 Naya Port (3307)
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql # 👈 Purana data yahan se load hoga
+    networks:
+      - servicefinder1-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    restart: always
+    ports:
+      - "6380:6379" # 👈 Naya Redis Port (6380)
+    volumes:
+      - redis_data:/data
+    networks:
+      - servicefinder1-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./ServiceFinder-Backend
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 8081
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/servicefinder1 # 👈 Naye database se connect
+      SPRING_DATASOURCE_USERNAME: junaid
+      SPRING_DATASOURCE_PASSWORD: Junaid@123
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      JWT_SECRET: mySuperSecretKeyForServiceFinderAppThatIsAtLeast256BitsLong1234567890
+      JWT_EXPIRATION: 86400000
+      SPRING_MAIL_HOST: smtp.gmail.com
+      SPRING_MAIL_PORT: 587
+      SPRING_MAIL_USERNAME: junaidbadshah429@gmail.com
+      SPRING_MAIL_PASSWORD: "mmypihtpwhdikrxe"
+      SPRING_MAIL_PROPERTIES_MAIL_SMTP_AUTH: "true"
+      SPRING_MAIL_PROPERTIES_MAIL_SMTP_STARTTLS_ENABLE: "true"
+    ports:
+      - "8082:8081" # 👈 Naya Backend Port (8082)
+    networks:
+      - servicefinder1-network
+
+  frontend:
+    build: ./ServiceFinder-Frontend
+    restart: always
+    depends_on:
+      - backend
+    ports:
+      - "5174:80" # 👈 Naya Frontend Port (5174)
+    networks:
+      - servicefinder1-network
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  servicefinder1-network:
+    driver: bridge
