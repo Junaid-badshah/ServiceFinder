@@ -1,4 +1,4 @@
-cat > README.md << 'EOF'
+
 # ServiceFinder 🔧
 
 A comprehensive full-stack service booking platform connecting customers with local service providers (Plumbers, Electricians, Technicians, etc.). Built with a focus on scalable architecture, secure role-based access, and a seamless user experience.
